@@ -1,0 +1,140 @@
+# aus_yolo_mlops - infrastructure
+#
+#   docker compose up -d minio mlflow      # storage + tracking only
+#   docker compose up -d                   # + Airflow (UI on http://localhost:8080)
+#   docker compose run --rm airflow-scheduler airflow dags list
+#
+# The pipeline itself runs on the host (`python run_cli.py ...`) or through the
+# Airflow DAG `aus_yolo_mlops_pipeline` (each task = one `run_cli.py` stage).
+name: aus-yolo-mlops
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile.airflow
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__DAGS_FOLDER: /project/airflow
+    AIRFLOW__CORE__FERNET_KEY: "JDbv4dohe4cevSzhcVkBKlvereO_mFzDGTNlee97E6s="
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__WEBSERVER__SECRET_KEY: "aus-yolo-mlops-dev-secret-change-me"
+    AIRFLOW__SCHEDULER__MIN_FILE_PROCESS_INTERVAL: "10"
+    # project + pipeline environment (overrides configs/pipeline.env where set)
+    MLOPS_PROJECT_ROOT: /project
+    MLOPS_PYTHON: /opt/pipeline-venv/bin/python
+    AUS_WORK_DIR: /project/work
+    AUS_MOUNT_DRIVE: "0"
+    AUS_PROFILE: custom
+    MLOPS_MLFLOW_TRACKING_URI: http://mlflow:5000
+    MLOPS_MINIO_ENDPOINT: http://minio:9000
+    MLOPS_MINIO_ACCESS_KEY: minioadmin
+    MLOPS_MINIO_SECRET_KEY: minioadmin
+    MLOPS_MINIO_BUCKET: aus-yolo-mlops
+  volumes:
+    - ./:/project
+    - airflow_logs:/opt/airflow/logs
+  user: "${AIRFLOW_UID:-50000}:0"
+
+services:
+  # ---------------------------------------------------------------- metadata
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # ------------------------------------------------------------------ MinIO
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      sleep 3;
+      mc alias set local http://minio:9000 minioadmin minioadmin;
+      mc mb -p local/aus-yolo-mlops;
+      mc mb -p local/mlruns;
+      mc anonymous set none local/aus-yolo-mlops;
+      exit 0;
+      "
+
+  # ----------------------------------------------------------------- MLflow
+  mlflow:
+    build:
+      context: .
+      dockerfile: Dockerfile.mlflow
+    environment:
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_DEFAULT_REGION: us-east-1
+    command: >
+      mlflow server --host 0.0.0.0 --port 5000
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --serve-artifacts --artifacts-destination s3://mlruns
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow_data:/mlflow
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+
+  # ----------------------------------------------------------------- Airflow
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create --username airflow --password airflow \
+          --firstname Airflow --lastname User --role Admin \
+          --email airflow@example.com || true
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  postgres_data:
+  minio_data:
+  mlflow_data:
+  airflow_logs:

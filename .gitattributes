@@ -1,0 +1,13 @@
+# keep LF endings everywhere so checkouts on Windows stay Docker/Linux-safe
+* text=auto
+*.py text eol=lf
+Dockerfile* text eol=lf
+docker-compose.yml text eol=lf
+*.yml text eol=lf
+*.env text eol=lf
+*.example text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.txt text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf

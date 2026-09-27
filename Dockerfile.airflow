@@ -1,0 +1,15 @@
+# Airflow image + an ISOLATED venv with the pipeline's dependencies.
+# The project is bind-mounted at /project at runtime; the venv keeps our
+# torch/ultralytics/pandas pins from colliding with Airflow's own packages.
+FROM apache/airflow:2.10.3-python3.11
+
+USER root
+RUN python -m venv /opt/pipeline-venv \
+    && /opt/pipeline-venv/bin/pip install --no-cache-dir --upgrade pip
+# CPU wheels first: keeps the image at ~1 GB instead of ~5 GB
+RUN /opt/pipeline-venv/bin/pip install --no-cache-dir \
+    torch torchvision --index-url https://download.pytorch.org/whl/cpu
+COPY requirements.txt /tmp/requirements.txt
+RUN /opt/pipeline-venv/bin/pip install --no-cache-dir -r /tmp/requirements.txt
+
+USER airflow
